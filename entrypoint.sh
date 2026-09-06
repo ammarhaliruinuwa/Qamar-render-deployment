@@ -16,14 +16,14 @@ WORKFLOW_FILE="/workflows/qamar-hair-agent.json"
 
 if [ -f "$WORKFLOW_FILE" ]; then
   echo "Preparing Qamar workflow for the pinned Render n8n version..."
-  # The workflow was exported from a newer n8n release. Normalize HTTP
-  # Request nodes from schema 4.5 to the compatible 4.2 schema used by the
-  # pinned n8n 2.27.0 image. This preserves the request URL, credentials and
-  # file-response configuration.
-  sed -i 's/"typeVersion": 4.5/"typeVersion": 4.2/g' "$WORKFLOW_FILE"
+  # The workflow file is owned by the image's root user. Copy it to a writable
+  # temporary location before normalizing the HTTP Request node schema.
+  PREPARED_WORKFLOW="/tmp/qamar-hair-agent.json"
+  cp "$WORKFLOW_FILE" "$PREPARED_WORKFLOW"
+  sed -i 's/"typeVersion": 4.5/"typeVersion": 4.2/g' "$PREPARED_WORKFLOW"
 
   echo "Importing Qamar workflow..."
-  n8n import:workflow --input="$WORKFLOW_FILE" || {
+  n8n import:workflow --input="$PREPARED_WORKFLOW" || {
     echo "WARNING: workflow import failed; starting n8n so the startup error can be inspected."
   }
 else
