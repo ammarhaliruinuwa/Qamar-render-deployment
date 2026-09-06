@@ -12,7 +12,7 @@
       "name": "Start Qamar Pairing",
       "type": "n8n-nodes-base.webhook",
       "typeVersion": 2,
-      "position": [-560, 0],
+      "position": [-800, 0],
       "webhookId": "6c2f5b0e-9a35-4c3f-bf4a-3d1c8b3d7a11"
     },
     {
@@ -26,12 +26,12 @@
       "name": "Generate WPP Token",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [-320, 0]
+      "position": [-560, 0]
     },
     {
       "parameters": {
         "method": "POST",
-        "url": "={{$env.WPPCONNECT_URL}}/api/{{$env.WPPCONNECT_SESSION}}/start-session",
+        "url": "={{$env.WPPCONNECT_URL}}/api/{{$env.WPPCONNECT_SESSION}}/close-session",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
@@ -45,17 +45,44 @@
             }
           ]
         },
+        "options": {}
+      },
+      "id": "7f0d4b9e-2a6c-4c8d-9e1f-5b7a3d6c8e20",
+      "name": "Reset Existing Qamar Session",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-320, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{$env.WPPCONNECT_URL}}/api/{{$env.WPPCONNECT_SESSION}}/start-session",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{$node[\"Generate WPP Token\"].json.full}}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
         "sendBody": true,
         "contentType": "raw",
         "rawContentType": "application/json",
         "body": "={\"phone\":\"2349069326165\",\"waitQrCode\":true}",
-        "options": {}
+        "options": {
+          "timeout": 120000
+        }
       },
       "id": "9a2e7b4c-4f17-4c1d-8f2b-6d9a7e5c3b41",
       "name": "Request Phone Pairing Code",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [0, 0]
+      "position": [-40, 0]
     },
     {
       "parameters": {
@@ -67,7 +94,7 @@
       "name": "Return Pairing Code",
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.1,
-      "position": [280, 0]
+      "position": [240, 0]
     }
   ],
   "connections": {
@@ -75,6 +102,9 @@
       "main": [[{"node": "Generate WPP Token", "type": "main", "index": 0}]]
     },
     "Generate WPP Token": {
+      "main": [[{"node": "Reset Existing Qamar Session", "type": "main", "index": 0}]]
+    },
+    "Reset Existing Qamar Session": {
       "main": [[{"node": "Request Phone Pairing Code", "type": "main", "index": 0}]]
     },
     "Request Phone Pairing Code": {
