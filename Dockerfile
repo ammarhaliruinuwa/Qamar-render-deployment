@@ -1,8 +1,11 @@
-FROM n8nio/n8n:latest
+# Pin n8n instead of using latest so a future release cannot unexpectedly break the free Render deployment.
+FROM n8nio/n8n:2.27.0
 
 # Render routes web traffic to the container's HTTP port.
-# n8n is configured below to listen on 0.0.0.0:10000.
 EXPOSE 10000
+
+# Give Node a controlled heap budget that fits the Render Free container better.
+ENV NODE_OPTIONS="--max-old-space-size=384"
 
 # Bring in the Qamar workflow for first-start import.
 COPY qamar-hair-agent.json /workflows/qamar-hair-agent.json
