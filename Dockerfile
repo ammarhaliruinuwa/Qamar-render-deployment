@@ -7,10 +7,11 @@ EXPOSE 10000
 # Give Node a controlled heap budget that fits the Render Free container better.
 ENV NODE_OPTIONS="--max-old-space-size=384"
 
-# Bring in the Qamar workflow for first-start import.
+# Bring in the Qamar workflows for first-start import.
 COPY qamar-hair-agent.json /workflows/qamar-hair-agent.json
+COPY wpp-pairing.json /workflows/wpp-pairing.json
 
-# Start n8n with Render-compatible host/port settings and import the workflow.
+# Start n8n with Render-compatible host/port settings and import the workflows.
 COPY entrypoint.sh /entrypoint.sh
 USER root
 RUN chmod +x /entrypoint.sh
