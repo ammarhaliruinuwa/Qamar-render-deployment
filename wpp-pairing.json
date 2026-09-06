@@ -1,0 +1,96 @@
+{
+  "name": "Qamar WPPConnect Phone Pairing",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "GET",
+        "path": "qamar-pair",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "6c2f5b0e-9a35-4c3f-bf4a-3d1c8b3d7a11",
+      "name": "Start Qamar Pairing",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [-560, 0],
+      "webhookId": "6c2f5b0e-9a35-4c3f-bf4a-3d1c8b3d7a11"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{$env.WPPCONNECT_URL}}/api/{{$env.WPPCONNECT_SESSION}}/{{$env.WPPCONNECT_SECRET}}/generate-token",
+        "sendBody": false,
+        "options": {}
+      },
+      "id": "c8f9d4d2-7a4a-4db5-9f0e-5f8f8a3d2b21",
+      "name": "Generate WPP Token",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-320, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{$env.WPPCONNECT_URL}}/api/{{$env.WPPCONNECT_SESSION}}/start-session",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{$json.full}}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={\"phone\":\"2349069326165\",\"waitQrCode\":true}",
+        "options": {}
+      },
+      "id": "9a2e7b4c-4f17-4c1d-8f2b-6d9a7e5c3b41",
+      "name": "Request Phone Pairing Code",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{$json}}",
+        "options": {}
+      },
+      "id": "2d6f8a1b-3c5e-4f7a-9b2d-8e1c6a4f5b73",
+      "name": "Return Pairing Code",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [280, 0]
+    }
+  ],
+  "connections": {
+    "Start Qamar Pairing": {
+      "main": [[{"node": "Generate WPP Token", "type": "main", "index": 0}]]
+    },
+    "Generate WPP Token": {
+      "main": [[{"node": "Request Phone Pairing Code", "type": "main", "index": 0}]]
+    },
+    "Request Phone Pairing Code": {
+      "main": [[{"node": "Return Pairing Code", "type": "main", "index": 0}]]
+    }
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": true
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": [],
+  "active": false,
+  "versionId": "b6e8f0a2-7d3c-4f91-8b2e-6a5c9d7f1e43",
+  "id": "QamarWPPPairing01"
+}
