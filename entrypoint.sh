@@ -6,6 +6,12 @@ set -e
 export N8N_LISTEN_ADDRESS="0.0.0.0"
 export N8N_PORT="${PORT:-10000}"
 
+# Keep the Free Render instance lightweight. The Python task runner is not
+# required by the Qamar workflow and can consume additional memory.
+export N8N_RUNNERS_ENABLED="false"
+export N8N_DIAGNOSTICS_ENABLED="false"
+export N8N_PERSONALIZATION_ENABLED="false"
+
 WORKFLOW_FILE="/workflows/qamar-hair-agent.json"
 
 if [ -f "$WORKFLOW_FILE" ]; then
