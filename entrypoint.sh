@@ -16,12 +16,11 @@ WORKFLOW_FILE="/workflows/qamar-hair-agent.json"
 
 if [ -f "$WORKFLOW_FILE" ]; then
   echo "Preparing Qamar workflow for the pinned Render n8n version..."
-  # The workflow was exported from a newer n8n release and its Download Voice
-  # Note HTTP Request node uses typeVersion 4.5. n8n 2.27.0 ships the HTTP
-  # Request node at the compatible 4.2 schema. Normalize only that node
-  # version before importing; its URL, WhatsApp credential and file response
-  # settings remain unchanged.
-  sed -i '0,/"name": "Download Voice Note"/!b; s/"typeVersion": 4.5/"typeVersion": 4.2/' "$WORKFLOW_FILE"
+  # The workflow was exported from a newer n8n release. Normalize HTTP
+  # Request nodes from schema 4.5 to the compatible 4.2 schema used by the
+  # pinned n8n 2.27.0 image. This preserves the request URL, credentials and
+  # file-response configuration.
+  sed -i 's/"typeVersion": 4.5/"typeVersion": 4.2/g' "$WORKFLOW_FILE"
 
   echo "Importing Qamar workflow..."
   n8n import:workflow --input="$WORKFLOW_FILE" || {
