@@ -41,7 +41,10 @@ async function readData(key) {
 }
 
 async function writeData(key, value) {
-  const response = await fetch(`${SUPABASE_URL}/rest/v1/${TABLE}`, {
+  const url = new URL(`${SUPABASE_URL}/rest/v1/${TABLE}`)
+  url.searchParams.set('on_conflict', 'key')
+
+  const response = await fetch(url, {
     method: 'POST',
     headers: headers({ Prefer: 'resolution=merge-duplicates,return=minimal' }),
     body: JSON.stringify({ key, value: encode(value), updated_at: new Date().toISOString() })
