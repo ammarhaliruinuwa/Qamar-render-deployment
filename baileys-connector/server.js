@@ -13,11 +13,13 @@ const N8N_WEBHOOK_URL = process.env.N8N_WEBHOOK_URL || ''
 const logger = pino({ level: process.env.LOG_LEVEL || 'info' })
 
 let sock = null
+let authState = null
 let connectionState = 'starting'
 let pairingInProgress = false
 let lastPairingCode = null
 let reconnecting = false
 let startupError = null
+let socketGeneration = 0
 
 function authorized(req) {
   return !API_KEY || req.headers['x-api-key'] === API_KEY
@@ -25,6 +27,10 @@ function authorized(req) {
 
 function validApiKey(value) {
   return !API_KEY || value === API_KEY
+}
+
+function isPaired() {
+  return !!authState?.state?.creds?.registered
 }
 
 async function postToN8N(event) {
@@ -42,21 +48,11 @@ async function postToN8N(event) {
 
     const body = await response.text().catch(() => '')
     let data = null
-
     if (body) {
-      try {
-        data = JSON.parse(body)
-      } catch {
-        data = null
-      }
+      try { data = JSON.parse(body) } catch { data = null }
     }
 
-    logger.info({
-      status: response.status,
-      ok: response.ok,
-      body: body.slice(0, 500)
-    }, 'n8n webhook POST completed')
-
+    logger.info({ status: response.status, ok: response.ok, body: body.slice(0, 500) }, 'n8n webhook POST completed')
     return { ok: response.ok, status: response.status, body, data }
   } catch (err) {
     logger.error({ err: String(err) }, 'n8n webhook POST failed')
@@ -71,7 +67,6 @@ async function notifyN8N(event) {
 
 function extractN8NReply(data, rawBody = '') {
   let value = data
-
   if (Array.isArray(value)) value = value[0] || null
 
   if (value && typeof value === 'object') {
@@ -91,11 +86,7 @@ async function processIncomingMessage(payload, fallbackTo) {
   const result = await postToN8N(payload)
 
   if (!result.ok) {
-    logger.error({
-      from: fallbackTo,
-      status: result.status,
-      body: result.body.slice(0, 1000)
-    }, 'Qamar message could not be delivered to n8n')
+    logger.error({ from: fallbackTo, status: result.status, body: result.body.slice(0, 1000) }, 'Qamar message could not be delivered to n8n')
     return
   }
 
@@ -126,16 +117,54 @@ async function processIncomingMessage(payload, fallbackTo) {
   }
 }
 
+async function waitForPairingSocketReady(currentSock, timeoutMs = 15000) {
+  if (!currentSock) throw new Error('WhatsApp socket is not ready')
+  if (isPaired()) return
+
+  await new Promise((resolve, reject) => {
+    let settled = false
+    const timer = setTimeout(() => {
+      if (settled) return
+      settled = true
+      reject(new Error('WhatsApp socket did not become ready for pairing in time'))
+    }, timeoutMs)
+
+    const onUpdate = ({ connection }) => {
+      if (settled) return
+      if (connection === 'open' || connection === 'connecting') {
+        settled = true
+        clearTimeout(timer)
+        currentSock.ev.off('connection.update', onUpdate)
+        resolve()
+      }
+    }
+
+    currentSock.ev.on('connection.update', onUpdate)
+  })
+
+  await new Promise(resolve => setTimeout(resolve, 1200))
+}
+
 async function generatePairingCode(phone) {
   if (!sock) throw new Error('WhatsApp socket is not ready')
-  if (sock?.authState?.creds?.registered) throw new Error('WhatsApp is already paired')
+  if (isPaired()) throw new Error('WhatsApp is already paired')
+  if (connectionState === 'closed') throw new Error('WhatsApp connection is closed; wait for reconnect')
   if (pairingInProgress) throw new Error('A pairing request is already pending')
 
+  const currentSock = sock
   pairingInProgress = true
+
   try {
-    const code = await sock.requestPairingCode(phone)
+    await waitForPairingSocketReady(currentSock)
+    if (currentSock !== sock) throw new Error('WhatsApp socket changed; please try pairing again')
+
+    const normalizedPhone = String(phone).replace(/\D/g, '')
+    if (!normalizedPhone) throw new Error('Invalid phone number')
+
+    logger.info({ phone: normalizedPhone }, 'Requesting Qamar WhatsApp pairing code')
+    const code = await currentSock.requestPairingCode(normalizedPhone)
     lastPairingCode = code
-    await notifyN8N({ type: 'PAIRING_CODE_GENERATED', phone, code })
+    await notifyN8N({ type: 'PAIRING_CODE_GENERATED', phone: normalizedPhone, code })
     return code
   } finally {
     pairingInProgress = false
@@ -170,10 +199,13 @@ function normalizeInboundMessage(msg) {
 }
 
 async function startSocket() {
-  const { state, saveCreds } = await useSupabaseAuthState()
+  const generation = ++socketGeneration
+  const stateBundle = await useSupabaseAuthState()
+  authState = stateBundle
+  const { state, saveCreds } = stateBundle
   const { version } = await fetchLatestBaileysVersion()
 
-  sock = makeWASocket({
+  const currentSock = makeWASocket({
     version,
     auth: {
       creds: state.creds,
@@ -184,29 +216,23 @@ async function startSocket() {
     logger
   })
 
-  sock.ev.on('creds.update', saveCreds)
+  sock = currentSock
+  connectionState = 'connecting'
+  startupError = null
 
-  if (!state.creds.registered && process.env.AUTO_PAIRING_PHONE) {
-    const phone = String(process.env.AUTO_PAIRING_PHONE).replace(/\D/g, '')
-    if (phone) {
-      try {
-        const code = await generatePairingCode(phone)
-        logger.info({ phone, code }, 'Qamar pairing code generated')
-      } catch (err) {
-        logger.error({ err: String(err) }, 'automatic pairing code generation failed')
-      }
-    }
-  }
+  currentSock.ev.on('creds.update', saveCreds)
 
-  sock.ev.on('connection.update', async ({ connection, lastDisconnect }) => {
+  currentSock.ev.on('connection.update', async ({ connection, lastDisconnect }) => {
+    if (currentSock !== sock || generation !== socketGeneration) return
+
     connectionState = connection || connectionState
 
     if (connection === 'open') {
       lastPairingCode = null
       pairingInProgress = false
       startupError = null
-      logger.info({ user: sock.user?.id }, 'Qamar WhatsApp connected with persistent Supabase auth')
-      await notifyN8N({ type: 'WHATSAPP_CONNECTED', user: sock.user?.id || null })
+      logger.info({ user: currentSock.user?.id }, 'Qamar WhatsApp connected with persistent Supabase auth')
+      await notifyN8N({ type: 'WHATSAPP_CONNECTED', user: currentSock.user?.id || null })
     }
 
     if (connection === 'close') {
@@ -220,6 +246,7 @@ async function startSocket() {
         reconnecting = true
         setTimeout(async () => {
           reconnecting = false
+          if (currentSock !== sock || generation !== socketGeneration) return
           try {
             await startSocket()
           } catch (err) {
@@ -231,7 +258,8 @@ async function startSocket() {
     }
   })
 
-  sock.ev.on('messages.upsert', async ({ messages, type }) => {
+  currentSock.ev.on('messages.upsert', async ({ messages, type }) => {
+    if (currentSock !== sock || generation !== socketGeneration) return
     logger.info({ eventType: type, count: messages?.length || 0 }, 'WhatsApp messages.upsert received')
     if (type !== 'notify') return
 
@@ -258,7 +286,7 @@ async function startSocket() {
           changes: [{
             value: {
               messaging_product: 'whatsapp',
-              metadata: { phone_number_id: sock?.user?.id || '' },
+              metadata: { phone_number_id: currentSock?.user?.id || '' },
               contacts: [{ profile: { name: msg.pushName || '' }, wa_id: from }],
               messages: [{
                 from,
@@ -278,6 +306,20 @@ async function startSocket() {
       await processIncomingMessage(payload, from)
     }
   })
+
+  // Pair only after the socket event handlers are attached and the connection has had time to initialize.
+  // This avoids the previous race where requestPairingCode() ran before connection.update was subscribed.
+  if (!state.creds.registered && process.env.AUTO_PAIRING_PHONE) {
+    const phone = String(process.env.AUTO_PAIRING_PHONE).replace(/\D/g, '')
+    if (phone) {
+      try {
+        const code = await generatePairingCode(phone)
+        logger.info({ phone, code }, 'Qamar pairing code generated')
+      } catch (err) {
+        logger.error({ err: String(err) }, 'automatic pairing code generation failed')
+      }
+    }
+  }
 }
 
 app.get('/', (_req, res) => {
@@ -290,8 +332,8 @@ app.get('/health', (_req, res) => {
     service: 'qamar-baileys',
     connection: connectionState,
     connected: !!sock?.user,
-    paired: !!sock?.authState?.creds?.registered,
-    pairingReady: !sock?.authState?.creds?.registered && !!sock,
+    paired: isPaired(),
+    pairingReady: !isPaired() && !!sock && connectionState !== 'closed',
     persistence: 'supabase',
     startupError
   })
@@ -302,7 +344,7 @@ app.get('/status', (req, res) => {
   res.json({
     connection: connectionState,
     connected: !!sock?.user,
-    paired: !!sock?.authState?.creds?.registered,
+    paired: isPaired(),
     pairingInProgress,
     pairingCodeAvailable: !!lastPairingCode,
     persistence: 'supabase',
@@ -315,7 +357,7 @@ app.post('/pair-ui', async (req, res) => {
   const key = String(req.body?.key || '')
   if (!validApiKey(key)) return res.status(401).type('html').send('<h3>Unauthorized</h3><p>Invalid pairing access key.</p><p><a href="/">Back</a></p>')
   if (!sock) return res.status(503).type('html').send('<h3>Not ready</h3><p>WhatsApp socket is not ready yet. Refresh and try again.</p><p><a href="/">Back</a></p>')
-  if (sock?.authState?.creds?.registered) return res.status(409).type('html').send('<h3>Already paired</h3><p>Qamar WhatsApp is already paired.</p><p><a href="/">Back</a></p>')
+  if (isPaired()) return res.status(409).type('html').send('<h3>Already paired</h3><p>Qamar WhatsApp is already paired.</p><p><a href="/">Back</a></p>')
 
   const phone = String(req.body?.phone || '').replace(/\D/g, '')
   if (!phone) return res.status(400).type('html').send('<h3>Invalid number</h3><p>Enter the WhatsApp number with country code, digits only.</p><p><a href="/">Back</a></p>')
@@ -332,7 +374,7 @@ app.post('/pair-ui', async (req, res) => {
 app.post('/pair', async (req, res) => {
   if (!authorized(req)) return res.status(401).json({ error: 'Unauthorized' })
   if (!sock) return res.status(503).json({ error: 'WhatsApp socket is not ready' })
-  if (sock?.authState?.creds?.registered) return res.status(409).json({ error: 'WhatsApp is already paired', user: sock.user?.id || null })
+  if (isPaired()) return res.status(409).json({ error: 'WhatsApp is already paired', user: sock.user?.id || null })
 
   const phone = String(req.body?.phone || '').replace(/\D/g, '')
   if (!phone) return res.status(400).json({ error: 'Provide phone with country code, digits only' })
@@ -349,24 +391,26 @@ app.post('/pair', async (req, res) => {
 app.post('/send', async (req, res) => {
   if (!authorized(req)) return res.status(401).json({ error: 'Unauthorized' })
   if (!sock?.user) return res.status(409).json({ error: 'WhatsApp is not connected' })
+
   const to = String(req.body?.to || '').replace(/\D/g, '')
   const text = String(req.body?.text || '')
   if (!to || !text) return res.status(400).json({ error: 'Provide to and text' })
+
   try {
     const sent = await sock.sendMessage(`${to}@s.whatsapp.net`, { text })
-    res.json({ ok: true, id: sent?.key?.id || null })
+    res.json({ ok: true, to, messageId: sent?.key?.id || null })
   } catch (err) {
-    logger.error({ err: String(err) }, 'WhatsApp send failed')
+    logger.error({ to, err: String(err) }, 'WhatsApp send failed')
     res.status(502).json({ error: String(err?.message || err) })
   }
 })
 
-app.listen(PORT, '0.0.0.0', async () => {
+app.listen(PORT, '0.0.0.0', () => {
   logger.info({ port: PORT }, 'Qamar Baileys connector listening')
-  try {
-    await startSocket()
-  } catch (err) {
-    startupError = String(err)
-    logger.error({ err: startupError }, 'initial WhatsApp socket failed')
-  }
+})
+
+startSocket().catch(err => {
+  startupError = String(err)
+  connectionState = 'error'
+  logger.error({ err: startupError }, 'initial WhatsApp socket startup failed')
 })
