@@ -27,23 +27,102 @@ function validApiKey(value) {
   return !API_KEY || value === API_KEY
 }
 
-async function notifyN8N(event) {
+async function postToN8N(event) {
   if (!N8N_WEBHOOK_URL) {
     logger.warn('N8N_WEBHOOK_URL is not configured')
-    return false
+    return { ok: false, status: 0, body: '', data: null }
   }
+
   try {
     const response = await fetch(N8N_WEBHOOK_URL, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(event)
     })
+
     const body = await response.text().catch(() => '')
-    logger.info({ status: response.status, ok: response.ok, body: body.slice(0, 500) }, 'n8n webhook POST completed')
-    return response.ok
+    let data = null
+
+    if (body) {
+      try {
+        data = JSON.parse(body)
+      } catch {
+        data = null
+      }
+    }
+
+    logger.info({
+      status: response.status,
+      ok: response.ok,
+      body: body.slice(0, 500)
+    }, 'n8n webhook POST completed')
+
+    return { ok: response.ok, status: response.status, body, data }
   } catch (err) {
     logger.error({ err: String(err) }, 'n8n webhook POST failed')
-    return false
+    return { ok: false, status: 0, body: '', data: null }
+  }
+}
+
+async function notifyN8N(event) {
+  const result = await postToN8N(event)
+  return result.ok
+}
+
+function extractN8NReply(data, rawBody = '') {
+  let value = data
+
+  if (Array.isArray(value)) value = value[0] || null
+
+  if (value && typeof value === 'object') {
+    const text = value.text ?? value.reply ?? value.message ?? value.output ?? value.response
+    if (typeof text === 'string' && text.trim()) return text.trim()
+  }
+
+  if (typeof rawBody === 'string' && rawBody.trim()) {
+    const plain = rawBody.trim()
+    if (!plain.startsWith('{') && !plain.startsWith('[')) return plain
+  }
+
+  return ''
+}
+
+async function processIncomingMessage(payload, fallbackTo) {
+  const result = await postToN8N(payload)
+
+  if (!result.ok) {
+    logger.error({
+      from: fallbackTo,
+      status: result.status,
+      body: result.body.slice(0, 1000)
+    }, 'Qamar message could not be delivered to n8n')
+    return
+  }
+
+  const replyText = extractN8NReply(result.data, result.body)
+  if (!replyText) {
+    logger.warn({ from: fallbackTo, body: result.body.slice(0, 1000) }, 'n8n returned no usable reply text')
+    return
+  }
+
+  const responseData = Array.isArray(result.data) ? (result.data[0] || {}) : (result.data || {})
+  const target = String(responseData.to || fallbackTo || '').replace(/\D/g, '')
+
+  if (!target) {
+    logger.error({ from: fallbackTo }, 'n8n reply has no valid WhatsApp recipient')
+    return
+  }
+
+  if (!sock?.user) {
+    logger.error({ target }, 'Cannot send n8n reply because WhatsApp is not connected')
+    return
+  }
+
+  try {
+    const sent = await sock.sendMessage(`${target}@s.whatsapp.net`, { text: replyText })
+    logger.info({ target, messageId: sent?.key?.id || null, text: replyText.slice(0, 200) }, 'WhatsApp reply sent')
+  } catch (err) {
+    logger.error({ target, err: String(err) }, 'WhatsApp reply send failed')
   }
 }
 
@@ -196,8 +275,7 @@ async function startSocket() {
       }
 
       logger.info({ from, messageId: msg.key.id, messageType, text: text.slice(0, 200) }, 'Forwarding WhatsApp message to n8n')
-      const ok = await notifyN8N(payload)
-      if (!ok) logger.error({ from, messageId: msg.key.id }, 'Qamar message could not be delivered to n8n')
+      await processIncomingMessage(payload, from)
     }
   })
 }
