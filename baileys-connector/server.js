@@ -27,15 +27,23 @@ function validApiKey(value) {
 }
 
 async function notifyN8N(event) {
-  if (!N8N_WEBHOOK_URL) return
+  if (!N8N_WEBHOOK_URL) {
+    logger.warn('N8N_WEBHOOK_URL is not configured')
+    return false
+  }
+
   try {
-    await fetch(N8N_WEBHOOK_URL, {
+    const response = await fetch(N8N_WEBHOOK_URL, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(event)
     })
+    const body = await response.text().catch(() => '')
+    logger.info({ status: response.status, ok: response.ok, body: body.slice(0, 500) }, 'n8n webhook POST completed')
+    return response.ok
   } catch (err) {
-    logger.warn({ err: String(err) }, 'n8n webhook notification failed')
+    logger.error({ err: String(err) }, 'n8n webhook POST failed')
+    return false
   }
 }
 
@@ -52,6 +60,45 @@ async function generatePairingCode(phone) {
     return code
   } finally {
     pairingInProgress = false
+  }
+}
+
+function extractMessageText(message) {
+  if (!message) return ''
+  return message.conversation
+    || message.extendedTextMessage?.text
+    || message.imageMessage?.caption
+    || message.videoMessage?.caption
+    || message.documentMessage?.caption
+    || message.buttonsResponseMessage?.selectedDisplayText
+    || message.listResponseMessage?.title
+    || message.templateButtonReplyMessage?.selectedDisplayText
+    || ''
+}
+
+function normalizeInboundMessage(msg) {
+  const message = msg.message || {}
+  const messageType = message.conversation || message.extendedTextMessage?.text
+    ? 'text'
+    : message.audioMessage
+      ? 'audio'
+      : message.imageMessage
+        ? 'image'
+        : message.videoMessage
+          ? 'video'
+          : message.documentMessage
+            ? 'document'
+            : 'unknown'
+
+  return {
+    key: {
+      id: msg.key?.id || '',
+      remoteJid: msg.key?.remoteJid || '',
+      fromMe: !!msg.key?.fromMe
+    },
+    message,
+    messageTimestamp: msg.messageTimestamp || null,
+    pushName: msg.pushName || ''
   }
 }
 
@@ -72,8 +119,6 @@ async function startSocket() {
 
   sock.ev.on('creds.update', saveCreds)
 
-  // Pairing-code authentication is requested directly from the socket.
-  // It must not depend on a QR event; pairing code and QR are separate flows.
   if (!state.creds.registered && process.env.AUTO_PAIRING_PHONE) {
     const phone = String(process.env.AUTO_PAIRING_PHONE).replace(/\D/g, '')
     if (phone) {
@@ -113,17 +158,54 @@ async function startSocket() {
   })
 
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
+    logger.info({ eventType: type, count: messages?.length || 0 }, 'WhatsApp messages.upsert received')
     if (type !== 'notify') return
-    for (const msg of messages) {
-      if (msg.key.fromMe || !msg.message) continue
-      const text = msg.message.conversation || msg.message.extendedTextMessage?.text || ''
-      await notifyN8N({
-        type: 'WHATSAPP_MESSAGE',
-        from: msg.key.remoteJid,
-        messageId: msg.key.id,
-        text,
-        timestamp: msg.messageTimestamp || null
-      })
+
+    for (const rawMsg of messages) {
+      if (rawMsg.key?.fromMe || !rawMsg.message) continue
+
+      const msg = normalizeInboundMessage(rawMsg)
+      const text = extractMessageText(msg.message)
+      const messageType = msg.message?.audioMessage ? 'audio'
+        : msg.message?.imageMessage ? 'image'
+        : msg.message?.videoMessage ? 'video'
+        : msg.message?.documentMessage ? 'document'
+        : 'text'
+
+      const from = String(msg.key?.remoteJid || '').replace(/@s\.whatsapp\.net$|@lid$/g, '')
+      if (!from || !msg.key?.id) {
+        logger.warn({ remoteJid: msg.key?.remoteJid, id: msg.key?.id }, 'Skipping inbound message with missing sender or id')
+        continue
+      }
+
+      // Qamar n8n workflow expects the WhatsApp Cloud-style `messages` envelope.
+      // This keeps the existing Parse WhatsApp Event node compatible while Baileys
+      // remains the transport layer.
+      const payload = {
+        object: 'whatsapp_baileys',
+        entry: [{
+          changes: [{
+            value: {
+              messaging_product: 'whatsapp',
+              metadata: { phone_number_id: sock?.user?.id || '' },
+              contacts: [{ profile: { name: msg.pushName || '' }, wa_id: from }],
+              messages: [{
+                from,
+                id: msg.key.id,
+                timestamp: String(msg.messageTimestamp || Math.floor(Date.now() / 1000)),
+                type: messageType,
+                ...(messageType === 'text' ? { text: { body: text } } : {}),
+                ...(messageType === 'audio' ? { audio: { id: msg.key.id } } : {})
+              }]
+            }
+          }]
+        }],
+        type: 'WHATSAPP_MESSAGE'
+      }
+
+      logger.info({ from, messageId: msg.key.id, messageType, text: text.slice(0, 200) }, 'Forwarding WhatsApp message to n8n')
+      const ok = await notifyN8N(payload)
+      if (!ok) logger.error({ from, messageId: msg.key.id }, 'Qamar message could not be delivered to n8n')
     }
   })
 }
