@@ -1,0 +1,1 @@
+{"name":"qamar-baileys-connector","version":"0.1.0","private":true,"type":"module","scripts":{"start":"node server.js"},"engines":{"node":">=20"},"dependencies":{"baileys":"7.0.0-rc14","express":"^5.1.0","pino":"^9.6.0"}}
