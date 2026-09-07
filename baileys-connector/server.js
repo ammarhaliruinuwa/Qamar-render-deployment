@@ -1,14 +1,14 @@
 import express from 'express'
-import makeWASocket, { Browsers, DisconnectReason, fetchLatestBaileysVersion, makeCacheableSignalKeyStore, useMultiFileAuthState } from 'baileys'
+import makeWASocket, { Browsers, DisconnectReason, fetchLatestBaileysVersion, makeCacheableSignalKeyStore } from 'baileys'
 import pino from 'pino'
-import fs from 'node:fs'
+import { useSupabaseAuthState } from './supabase-auth-state.js'
 
 const app = express()
 app.use(express.json())
 app.use(express.urlencoded({ extended: false }))
+
 const PORT = Number(process.env.PORT || 10000)
 const API_KEY = process.env.PAIRING_API_KEY || ''
-const AUTH_DIR = process.env.AUTH_DIR || './auth_session'
 const N8N_WEBHOOK_URL = process.env.N8N_WEBHOOK_URL || ''
 const logger = pino({ level: process.env.LOG_LEVEL || 'info' })
 
@@ -17,6 +17,7 @@ let connectionState = 'starting'
 let pairingInProgress = false
 let lastPairingCode = null
 let reconnecting = false
+let startupError = null
 
 function authorized(req) {
   return !API_KEY || req.headers['x-api-key'] === API_KEY
@@ -31,7 +32,6 @@ async function notifyN8N(event) {
     logger.warn('N8N_WEBHOOK_URL is not configured')
     return false
   }
-
   try {
     const response = await fetch(N8N_WEBHOOK_URL, {
       method: 'POST',
@@ -78,18 +78,6 @@ function extractMessageText(message) {
 
 function normalizeInboundMessage(msg) {
   const message = msg.message || {}
-  const messageType = message.conversation || message.extendedTextMessage?.text
-    ? 'text'
-    : message.audioMessage
-      ? 'audio'
-      : message.imageMessage
-        ? 'image'
-        : message.videoMessage
-          ? 'video'
-          : message.documentMessage
-            ? 'document'
-            : 'unknown'
-
   return {
     key: {
       id: msg.key?.id || '',
@@ -103,7 +91,7 @@ function normalizeInboundMessage(msg) {
 }
 
 async function startSocket() {
-  const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR)
+  const { state, saveCreds } = await useSupabaseAuthState()
   const { version } = await fetchLatestBaileysVersion()
 
   sock = makeWASocket({
@@ -137,7 +125,8 @@ async function startSocket() {
     if (connection === 'open') {
       lastPairingCode = null
       pairingInProgress = false
-      logger.info({ user: sock.user?.id }, 'Qamar WhatsApp connected')
+      startupError = null
+      logger.info({ user: sock.user?.id }, 'Qamar WhatsApp connected with persistent Supabase auth')
       await notifyN8N({ type: 'WHATSAPP_CONNECTED', user: sock.user?.id || null })
     }
 
@@ -147,11 +136,17 @@ async function startSocket() {
       connectionState = 'closed'
       lastPairingCode = null
       pairingInProgress = false
+
       if (status !== DisconnectReason.loggedOut && !reconnecting) {
         reconnecting = true
         setTimeout(async () => {
           reconnecting = false
-          try { await startSocket() } catch (err) { logger.error({ err: String(err) }, 'reconnect failed') }
+          try {
+            await startSocket()
+          } catch (err) {
+            startupError = String(err)
+            logger.error({ err: startupError }, 'reconnect failed')
+          }
         }, 3000)
       }
     }
@@ -178,9 +173,6 @@ async function startSocket() {
         continue
       }
 
-      // Qamar n8n workflow expects the WhatsApp Cloud-style `messages` envelope.
-      // This keeps the existing Parse WhatsApp Event node compatible while Baileys
-      // remains the transport layer.
       const payload = {
         object: 'whatsapp_baileys',
         entry: [{
@@ -211,7 +203,7 @@ async function startSocket() {
 }
 
 app.get('/', (_req, res) => {
-  res.type('html').send(`<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Qamar WhatsApp Pairing</title><style>body{font-family:system-ui,sans-serif;max-width:520px;margin:40px auto;padding:20px}input,button{width:100%;box-sizing:border-box;padding:14px;margin:8px 0;font-size:16px}button{cursor:pointer}.card{padding:20px;border:1px solid #ddd;border-radius:14px}.code{font-size:28px;font-weight:700;letter-spacing:4px;text-align:center;margin:20px 0}small{color:#666}</style></head><body><div class="card"><h2>Qamar WhatsApp Pairing</h2><p>Generate a WhatsApp pairing code without using GET/POST tools manually.</p><form method="post" action="/pair-ui"><label>Pairing access key</label><input type="password" name="key" autocomplete="off" required><label>WhatsApp number with country code</label><input type="tel" name="phone" placeholder="2348012345678" inputmode="numeric" required><button type="submit">Generate Pairing Code</button></form><small>Your access key is sent only over HTTPS and is not displayed in the result.</small></div></body></html>`)
+  res.type('html').send(`<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Qamar WhatsApp Pairing</title><style>body{font-family:system-ui,sans-serif;max-width:520px;margin:40px auto;padding:20px}input,button{width:100%;box-sizing:border-box;padding:14px;margin:8px 0;font-size:16px}button{cursor:pointer}.card{padding:20px;border:1px solid #ddd;border-radius:14px}.code{font-size:28px;font-weight:700;letter-spacing:4px;text-align:center;margin:20px 0}small{color:#666}</style></head><body><div class="card"><h2>Qamar WhatsApp Pairing</h2><p>Generate a WhatsApp pairing code. Authentication is stored in Supabase so Render redeploys do not erase the session.</p><form method="post" action="/pair-ui"><label>Pairing access key</label><input type="password" name="key" autocomplete="off" required><label>WhatsApp number with country code</label><input type="tel" name="phone" placeholder="2348012345678" inputmode="numeric" required><button type="submit">Generate Pairing Code</button></form><small>Your access key is sent only over HTTPS and is not displayed in the result.</small></div></body></html>`)
 })
 
 app.get('/health', (_req, res) => {
@@ -221,7 +213,9 @@ app.get('/health', (_req, res) => {
     connection: connectionState,
     connected: !!sock?.user,
     paired: !!sock?.authState?.creds?.registered,
-    pairingReady: !sock?.authState?.creds?.registered && !!sock
+    pairingReady: !sock?.authState?.creds?.registered && !!sock,
+    persistence: 'supabase',
+    startupError
   })
 })
 
@@ -233,7 +227,9 @@ app.get('/status', (req, res) => {
     paired: !!sock?.authState?.creds?.registered,
     pairingInProgress,
     pairingCodeAvailable: !!lastPairingCode,
-    user: sock?.user?.id || null
+    persistence: 'supabase',
+    user: sock?.user?.id || null,
+    startupError
   })
 })
 
@@ -259,7 +255,6 @@ app.post('/pair', async (req, res) => {
   if (!authorized(req)) return res.status(401).json({ error: 'Unauthorized' })
   if (!sock) return res.status(503).json({ error: 'WhatsApp socket is not ready' })
   if (sock?.authState?.creds?.registered) return res.status(409).json({ error: 'WhatsApp is already paired', user: sock.user?.id || null })
-  if (pairingInProgress) return res.status(409).json({ error: 'A pairing request is already pending' })
 
   const phone = String(req.body?.phone || '').replace(/\D/g, '')
   if (!phone) return res.status(400).json({ error: 'Provide phone with country code, digits only' })
@@ -279,13 +274,21 @@ app.post('/send', async (req, res) => {
   const to = String(req.body?.to || '').replace(/\D/g, '')
   const text = String(req.body?.text || '')
   if (!to || !text) return res.status(400).json({ error: 'Provide to and text' })
-  const jid = `${to}@s.whatsapp.net`
-  const sent = await sock.sendMessage(jid, { text })
-  res.json({ ok: true, id: sent?.key?.id || null })
+  try {
+    const sent = await sock.sendMessage(`${to}@s.whatsapp.net`, { text })
+    res.json({ ok: true, id: sent?.key?.id || null })
+  } catch (err) {
+    logger.error({ err: String(err) }, 'WhatsApp send failed')
+    res.status(502).json({ error: String(err?.message || err) })
+  }
 })
 
 app.listen(PORT, '0.0.0.0', async () => {
   logger.info({ port: PORT }, 'Qamar Baileys connector listening')
-  fs.mkdirSync(AUTH_DIR, { recursive: true })
-  try { await startSocket() } catch (err) { logger.error({ err: String(err) }, 'initial WhatsApp socket failed') }
+  try {
+    await startSocket()
+  } catch (err) {
+    startupError = String(err)
+    logger.error({ err: startupError }, 'initial WhatsApp socket failed')
+  }
 })
