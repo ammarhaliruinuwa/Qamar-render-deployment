@@ -13,9 +13,7 @@ const logger = pino({ level: process.env.LOG_LEVEL || 'info' })
 
 let sock = null
 let connectionState = 'starting'
-let pendingPhone = null
-let pendingResolve = null
-let pendingReject = null
+let pairingInProgress = false
 let lastPairingCode = null
 let reconnecting = false
 
@@ -46,36 +44,38 @@ async function startSocket() {
       creds: state.creds,
       keys: makeCacheableSignalKeyStore(state.keys, logger)
     },
-    browser: Browsers.ubuntu('Qamar'),
+    browser: Browsers.ubuntu('Chrome'),
     printQRInTerminal: false,
     logger
   })
 
   sock.ev.on('creds.update', saveCreds)
 
-  sock.ev.on('connection.update', async ({ connection, lastDisconnect, qr }) => {
-    connectionState = connection || connectionState
-
-    if (qr && pendingPhone && !sock.authState.creds.registered && !lastPairingCode) {
+  // Pairing-code authentication is requested directly from the socket.
+  // It must not depend on a QR event; pairing code and QR are separate flows.
+  if (!state.creds.registered && process.env.AUTO_PAIRING_PHONE) {
+    const phone = String(process.env.AUTO_PAIRING_PHONE).replace(/\D/g, '')
+    if (phone) {
       try {
-        const phone = pendingPhone.replace(/[^0-9]/g, '')
-        if (!phone) throw new Error('Phone number must contain digits and country code')
-        lastPairingCode = await sock.requestPairingCode(phone)
-        const code = lastPairingCode
-        logger.info({ code }, 'Qamar pairing code generated')
+        pairingInProgress = true
+        const code = await sock.requestPairingCode(phone)
+        lastPairingCode = code
+        logger.info({ phone, code }, 'Qamar pairing code generated')
         await notifyN8N({ type: 'PAIRING_CODE_GENERATED', phone, code })
-        pendingResolve?.({ code })
       } catch (err) {
-        pendingReject?.(err)
+        logger.error({ err: String(err) }, 'automatic pairing code generation failed')
       } finally {
-        pendingPhone = null
-        pendingResolve = null
-        pendingReject = null
+        pairingInProgress = false
       }
     }
+  }
+
+  sock.ev.on('connection.update', async ({ connection, lastDisconnect }) => {
+    connectionState = connection || connectionState
 
     if (connection === 'open') {
       lastPairingCode = null
+      pairingInProgress = false
       logger.info({ user: sock.user?.id }, 'Qamar WhatsApp connected')
       await notifyN8N({ type: 'WHATSAPP_CONNECTED', user: sock.user?.id || null })
     }
@@ -85,6 +85,7 @@ async function startSocket() {
       logger.warn({ status }, 'Qamar WhatsApp connection closed')
       connectionState = 'closed'
       lastPairingCode = null
+      pairingInProgress = false
       if (status !== DisconnectReason.loggedOut && !reconnecting) {
         reconnecting = true
         setTimeout(async () => {
@@ -112,37 +113,55 @@ async function startSocket() {
 }
 
 app.get('/health', (_req, res) => {
-  res.json({ ok: true, service: 'qamar-baileys', connection: connectionState, connected: !!sock?.user, paired: !!sock?.authState?.creds?.registered })
+  res.json({
+    ok: true,
+    service: 'qamar-baileys',
+    connection: connectionState,
+    connected: !!sock?.user,
+    paired: !!sock?.authState?.creds?.registered,
+    pairingReady: !sock?.authState?.creds?.registered && !!sock
+  })
 })
 
 app.get('/status', (req, res) => {
   if (!authorized(req)) return res.status(401).json({ error: 'Unauthorized' })
-  res.json({ connection: connectionState, connected: !!sock?.user, paired: !!sock?.authState?.creds?.registered, user: sock?.user?.id || null })
+  res.json({
+    connection: connectionState,
+    connected: !!sock?.user,
+    paired: !!sock?.authState?.creds?.registered,
+    pairingInProgress,
+    pairingCodeAvailable: !!lastPairingCode,
+    user: sock?.user?.id || null
+  })
 })
 
 app.post('/pair', async (req, res) => {
   if (!authorized(req)) return res.status(401).json({ error: 'Unauthorized' })
+  if (!sock) return res.status(503).json({ error: 'WhatsApp socket is not ready' })
   if (sock?.authState?.creds?.registered) return res.status(409).json({ error: 'WhatsApp is already paired', user: sock.user?.id || null })
-  if (pendingPhone) return res.status(409).json({ error: 'A pairing request is already pending' })
+  if (pairingInProgress) return res.status(409).json({ error: 'A pairing request is already pending' })
 
-  const phone = String(req.body?.phone || '').replace(/[^0-9]/g, '')
+  const phone = String(req.body?.phone || '').replace(/\D/g, '')
   if (!phone) return res.status(400).json({ error: 'Provide phone with country code, digits only' })
 
-  pendingPhone = phone
-  const result = await new Promise((resolve, reject) => {
-    pendingResolve = resolve
-    pendingReject = reject
-    setTimeout(() => reject(new Error('Timed out waiting for WhatsApp pairing window')), 30000)
-  }).catch(err => ({ error: err.message }))
-
-  if (result.error) return res.status(504).json(result)
-  res.json({ ok: true, phone, pairingCode: result.code, next: 'WhatsApp → Linked Devices → Link with phone number' })
+  try {
+    pairingInProgress = true
+    const code = await sock.requestPairingCode(phone)
+    lastPairingCode = code
+    await notifyN8N({ type: 'PAIRING_CODE_GENERATED', phone, code })
+    res.json({ ok: true, phone, pairingCode: code, next: 'WhatsApp → Linked Devices → Link with phone number' })
+  } catch (err) {
+    logger.error({ err: String(err) }, 'pairing code generation failed')
+    res.status(502).json({ error: String(err?.message || err) })
+  } finally {
+    pairingInProgress = false
+  }
 })
 
 app.post('/send', async (req, res) => {
   if (!authorized(req)) return res.status(401).json({ error: 'Unauthorized' })
   if (!sock?.user) return res.status(409).json({ error: 'WhatsApp is not connected' })
-  const to = String(req.body?.to || '').replace(/[^0-9]/g, '')
+  const to = String(req.body?.to || '').replace(/\D/g, '')
   const text = String(req.body?.text || '')
   if (!to || !text) return res.status(400).json({ error: 'Provide to and text' })
   const jid = `${to}@s.whatsapp.net`
