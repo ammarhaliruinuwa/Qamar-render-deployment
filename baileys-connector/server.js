@@ -237,7 +237,15 @@ async function startSocket() {
 
     if (connection === 'close') {
       const status = lastDisconnect?.error?.output?.statusCode
-      logger.warn({ status }, 'Qamar WhatsApp connection closed')
+      const disconnectData = lastDisconnect?.error?.data || null
+      const disconnectMessage = lastDisconnect?.error?.output?.payload?.message || lastDisconnect?.error?.message || null
+      logger.warn({
+        status,
+        disconnectData,
+        disconnectMessage,
+        errorName: lastDisconnect?.error?.name || null,
+        errorStack: lastDisconnect?.error?.stack || null
+      }, 'Qamar WhatsApp connection closed')
       connectionState = 'closed'
       lastPairingCode = null
       pairingInProgress = false
@@ -307,8 +315,6 @@ async function startSocket() {
     }
   })
 
-  // Pair only after the socket event handlers are attached and the connection has had time to initialize.
-  // This avoids the previous race where requestPairingCode() ran before connection.update was subscribed.
   if (!state.creds.registered && process.env.AUTO_PAIRING_PHONE) {
     const phone = String(process.env.AUTO_PAIRING_PHONE).replace(/\D/g, '')
     if (phone) {
