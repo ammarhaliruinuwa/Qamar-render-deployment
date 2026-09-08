@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "node server.js"
+    "start": "node -r global-agent/bootstrap.js server.js"
   },
   "engines": {
     "node": ">=20"
@@ -12,6 +12,7 @@
   "dependencies": {
     "baileys": "6.7.24",
     "express": "^5.1.0",
+    "global-agent": "^3.0.0",
     "pino": "^9.6.0"
   }
 }
