@@ -4,7 +4,26 @@ import https from 'node:https'
 import { HttpsProxyAgent } from 'https-proxy-agent'
 import { SocksProxyAgent } from 'socks-proxy-agent'
 
-const configuredProxyUrl = process.env.BAILEYS_PROXY_URL || process.env.GLOBAL_AGENT_HTTP_PROXY || ''
+function buildConfiguredProxyUrl() {
+  const direct = process.env.BAILEYS_PROXY_URL || process.env.GLOBAL_AGENT_HTTP_PROXY || process.env.HTTPS_PROXY || process.env.HTTP_PROXY || ''
+  if (direct) return direct
+
+  const user = process.env.DECODO_USERNAME || process.env.DECODO_USER || process.env.PROXY_USERNAME || ''
+  const password = process.env.DECODO_PASSWORD || process.env.DECODO_PASS || process.env.PROXY_PASSWORD || ''
+  if (!user || !password) return ''
+
+  const host = process.env.DECODO_HOST || 'gate.decodo.com'
+  const protocol = (process.env.DECODO_PROTOCOL || 'http').replace(/:$/, '')
+  const port = process.env.DECODO_PORT || (protocol.startsWith('socks') ? '7001' : '7000')
+  const session = process.env.DECODO_SESSION_ID || 'qamar-wa'
+
+  // For Decodo residential backconnect credentials, append a stable session
+  // identifier so the WhatsApp WebSocket is not moved between IPs.
+  const stickyUser = user.includes('-session-') ? user : `${user}-session-${session}`
+  return `${protocol}://${encodeURIComponent(stickyUser)}:${encodeURIComponent(password)}@${host}:${port}`
+}
+
+const configuredProxyUrl = buildConfiguredProxyUrl()
 
 function redactProxyUrl(value) {
   try {
@@ -42,9 +61,6 @@ function candidateProxyUrls(value) {
     if (url && !candidates.includes(url)) candidates.push(url)
   }
 
-  // Decodo officially exposes HTTP(S) on 7000 and SOCKS5 on 7001.
-  // WhatsApp needs a long-lived WSS connection, so test the available
-  // transports and use the first one that actually works from Render.
   if (host === 'gate.decodo.com' && isSocks && port === '7000') {
     const http = new URL(parsed.toString())
     http.protocol = 'http:'
@@ -113,6 +129,12 @@ let proxyUrl = ''
 let proxyAgent = null
 let isSocksProxy = false
 
+if (configuredProxyUrl) {
+  console.log(`Qamar detected proxy configuration: ${redactProxyUrl(configuredProxyUrl)}`)
+} else {
+  console.warn('Qamar no proxy configuration detected in Render environment')
+}
+
 for (const candidate of proxyCandidates) {
   const agent = makeAgent(candidate)
   const result = await testProxy(candidate, agent)
@@ -161,7 +183,6 @@ if (proxyAgent) {
 const serverPath = new URL('./server.js', import.meta.url)
 let serverSource = await readFile(serverPath, 'utf8')
 
-// Use the live WhatsApp Web revision rather than the repo-published resolver.
 serverSource = serverSource.replace(
   "fetchLatestBaileysVersion, makeCacheableSignalKeyStore",
   "fetchLatestBaileysVersion, fetchLatestWaWebVersion, makeCacheableSignalKeyStore"
