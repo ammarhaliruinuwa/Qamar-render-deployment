@@ -5,11 +5,49 @@ import { HttpsProxyAgent } from 'https-proxy-agent'
 import { SocksProxyAgent } from 'socks-proxy-agent'
 
 const proxyUrl = process.env.BAILEYS_PROXY_URL || process.env.GLOBAL_AGENT_HTTP_PROXY || ''
+const isSocksProxy = proxyUrl.startsWith('socks://') || proxyUrl.startsWith('socks5://') || proxyUrl.startsWith('socks5h://')
 const proxyAgent = proxyUrl
-  ? (proxyUrl.startsWith('socks://') || proxyUrl.startsWith('socks5://') || proxyUrl.startsWith('socks5h://')
-      ? new SocksProxyAgent(proxyUrl)
-      : new HttpsProxyAgent(proxyUrl))
+  ? (isSocksProxy ? new SocksProxyAgent(proxyUrl) : new HttpsProxyAgent(proxyUrl))
   : null
+
+function redactProxyUrl(value) {
+  try {
+    const parsed = new URL(value)
+    if (parsed.username) parsed.username = '***'
+    if (parsed.password) parsed.password = '***'
+    return parsed.toString()
+  } catch {
+    return '[invalid proxy URL]'
+  }
+}
+
+async function testWhatsAppProxy() {
+  if (!proxyAgent) return
+
+  await new Promise((resolve) => {
+    const req = https.request('https://web.whatsapp.com/', {
+      method: 'HEAD',
+      agent: proxyAgent,
+      timeout: 15000,
+      headers: { 'user-agent': 'Mozilla/5.0' }
+    }, (res) => {
+      console.log(`Qamar proxy TLS test succeeded: HTTP ${res.statusCode}`)
+      res.resume()
+      res.once('end', resolve)
+    })
+
+    req.once('timeout', () => {
+      console.error('Qamar proxy TLS test timed out after 15s')
+      req.destroy()
+      resolve()
+    })
+    req.once('error', (err) => {
+      console.error(`Qamar proxy TLS test failed: ${err?.code || err?.name || 'Error'} ${err?.message || err}`)
+      resolve()
+    })
+    req.end()
+  })
+}
 
 if (proxyAgent) {
   const originalRequest = https.request.bind(https)
@@ -39,7 +77,8 @@ if (proxyAgent) {
     return originalRequest(...args)
   }
 
-  console.log(`Qamar WhatsApp proxy agent enabled: ${proxyUrl.startsWith('socks') ? 'SOCKS5' : 'HTTPS'}`)
+  console.log(`Qamar WhatsApp proxy agent enabled: ${isSocksProxy ? 'SOCKS5' : 'HTTPS'} ${redactProxyUrl(proxyUrl)}`)
+  await testWhatsAppProxy()
 } else {
   console.log('Qamar WhatsApp proxy agent not configured')
 }
