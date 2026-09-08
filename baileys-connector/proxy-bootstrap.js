@@ -6,27 +6,6 @@ import { SocksProxyAgent } from 'socks-proxy-agent'
 
 const configuredProxyUrl = process.env.BAILEYS_PROXY_URL || process.env.GLOBAL_AGENT_HTTP_PROXY || ''
 
-function normalizeProxyUrl(value) {
-  if (!value) return ''
-  try {
-    const parsed = new URL(value)
-    // Decodo documents gate.decodo.com:7000 as the HTTP(S) gateway.
-    // Prefer HTTP CONNECT on that port because it is more reliable for WSS
-    // handshakes than forcing a SOCKS tunnel through the same gateway.
-    if ((parsed.protocol === 'socks:' || parsed.protocol === 'socks5:' || parsed.protocol === 'socks5h:') && parsed.port === '7000') {
-      parsed.protocol = 'http:'
-      return parsed.toString()
-    }
-  } catch {}
-  return value
-}
-
-const proxyUrl = normalizeProxyUrl(configuredProxyUrl)
-const isSocksProxy = proxyUrl.startsWith('socks://') || proxyUrl.startsWith('socks5://') || proxyUrl.startsWith('socks5h://')
-const proxyAgent = proxyUrl
-  ? (isSocksProxy ? new SocksProxyAgent(proxyUrl) : new HttpsProxyAgent(proxyUrl))
-  : null
-
 function redactProxyUrl(value) {
   try {
     const parsed = new URL(value)
@@ -38,15 +17,65 @@ function redactProxyUrl(value) {
   }
 }
 
-async function testWhatsAppProxy() {
-  if (!proxyAgent) return
+function makeAgent(proxyUrl) {
+  if (!proxyUrl) return null
+  const isSocks = /^socks5?h:|^socks:|^socks5:/i.test(proxyUrl)
+  return isSocks ? new SocksProxyAgent(proxyUrl) : new HttpsProxyAgent(proxyUrl)
+}
 
-  await new Promise((resolve) => {
+function candidateProxyUrls(value) {
+  if (!value) return []
+
+  let parsed
+  try {
+    parsed = new URL(value)
+  } catch {
+    return [value]
+  }
+
+  const host = parsed.hostname.toLowerCase()
+  const port = parsed.port || (parsed.protocol === 'https:' ? '443' : parsed.protocol === 'http:' ? '80' : '')
+  const isSocks = ['socks:', 'socks5:', 'socks5h:'].includes(parsed.protocol)
+  const candidates = []
+
+  const add = (url) => {
+    if (url && !candidates.includes(url)) candidates.push(url)
+  }
+
+  // Decodo officially exposes HTTP(S) on 7000 and SOCKS5 on 7001.
+  // WhatsApp needs a long-lived WSS connection, so test the available
+  // transports and use the first one that actually works from Render.
+  if (host === 'gate.decodo.com' && isSocks && port === '7000') {
+    const http = new URL(parsed.toString())
+    http.protocol = 'http:'
+    add(http.toString())
+
+    const socks = new URL(parsed.toString())
+    socks.protocol = 'socks5h:'
+    socks.port = '7001'
+    add(socks.toString())
+  } else if (host === 'gate.decodo.com' && isSocks && port === '7001') {
+    add(parsed.toString())
+    const http = new URL(parsed.toString())
+    http.protocol = 'http:'
+    http.port = '7000'
+    add(http.toString())
+  } else {
+    add(parsed.toString())
+  }
+
+  return candidates
+}
+
+async function testProxy(proxyUrl, proxyAgent) {
+  if (!proxyAgent) return { ok: true, status: 0 }
+
+  return await new Promise((resolve) => {
     let settled = false
-    const finish = () => {
+    const finish = (result) => {
       if (settled) return
       settled = true
-      resolve()
+      resolve(result)
     }
 
     const req = https.request('https://ip.decodo.com/ip', {
@@ -59,23 +88,45 @@ async function testWhatsAppProxy() {
       res.setEncoding('utf8')
       res.on('data', chunk => { body += chunk })
       res.on('end', () => {
-        console.log(`Qamar proxy connectivity test: HTTP ${res.statusCode} ${body.trim().slice(0, 120)}`)
-        finish()
+        const ok = res.statusCode >= 200 && res.statusCode < 300 && body.trim().length > 0
+        console.log(`Qamar proxy test ${redactProxyUrl(proxyUrl)} -> HTTP ${res.statusCode} ${ok ? 'OK' : 'FAILED'}`)
+        finish({ ok, status: res.statusCode, body: body.trim().slice(0, 120) })
       })
-      res.on('close', finish)
+      res.on('close', () => finish({ ok: false, status: res.statusCode || 0, body: '' }))
     })
 
     req.once('timeout', () => {
-      console.error('Qamar proxy connectivity test timed out after 12s')
+      console.error(`Qamar proxy test timed out: ${redactProxyUrl(proxyUrl)}`)
       req.destroy()
-      finish()
+      finish({ ok: false, status: 0, error: 'TIMEOUT' })
     })
     req.once('error', (err) => {
-      console.error(`Qamar proxy connectivity test failed: ${err?.code || err?.name || 'Error'} ${err?.message || err}`)
-      finish()
+      console.error(`Qamar proxy test failed: ${redactProxyUrl(proxyUrl)} -> ${err?.code || err?.name || 'Error'} ${err?.message || err}`)
+      finish({ ok: false, status: 0, error: err?.code || err?.name || 'ERROR' })
     })
     req.end()
   })
+}
+
+const proxyCandidates = candidateProxyUrls(configuredProxyUrl)
+let proxyUrl = ''
+let proxyAgent = null
+let isSocksProxy = false
+
+for (const candidate of proxyCandidates) {
+  const agent = makeAgent(candidate)
+  const result = await testProxy(candidate, agent)
+  if (result.ok) {
+    proxyUrl = candidate
+    proxyAgent = agent
+    isSocksProxy = /^(socks|socks5|socks5h):/i.test(candidate)
+    console.log(`Qamar selected working Decodo transport: ${isSocksProxy ? 'SOCKS5' : 'HTTP-CONNECT'} ${redactProxyUrl(candidate)}`)
+    break
+  }
+}
+
+if (configuredProxyUrl && !proxyAgent) {
+  console.error('Qamar could not establish a working Decodo proxy transport. WhatsApp will remain disconnected until the proxy endpoint is reachable.')
 }
 
 if (proxyAgent) {
@@ -105,21 +156,12 @@ if (proxyAgent) {
 
     return originalRequest(...args)
   }
-
-  console.log(`Qamar WhatsApp proxy agent enabled: ${isSocksProxy ? 'SOCKS5' : 'HTTP-CONNECT'} ${redactProxyUrl(proxyUrl)}`)
-  if (configuredProxyUrl !== proxyUrl) {
-    console.log('Qamar normalized the Decodo 7000 SOCKS URL to HTTP-CONNECT for stable WebSocket TLS')
-  }
-  await testWhatsAppProxy()
-} else {
-  console.log('Qamar WhatsApp proxy agent not configured')
 }
 
 const serverPath = new URL('./server.js', import.meta.url)
 let serverSource = await readFile(serverPath, 'utf8')
 
-// Prefer the live WhatsApp Web revision. Current Baileys reports and community
-// reports show that the repo-published resolver can fall behind Meta's revision.
+// Use the live WhatsApp Web revision rather than the repo-published resolver.
 serverSource = serverSource.replace(
   "fetchLatestBaileysVersion, makeCacheableSignalKeyStore",
   "fetchLatestBaileysVersion, fetchLatestWaWebVersion, makeCacheableSignalKeyStore"
