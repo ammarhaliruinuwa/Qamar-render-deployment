@@ -53,7 +53,8 @@ if (proxyAgent) {
   }
 
   const prelude = `import { HttpsProxyAgent as __QamarHttpsProxyAgent } from 'https-proxy-agent'\nconst __QamarProxyUrl = process.env.BAILEYS_PROXY_URL || process.env.GLOBAL_AGENT_HTTP_PROXY || ''\nconst __QamarProxyAgent = __QamarProxyUrl ? new __QamarHttpsProxyAgent(__QamarProxyUrl) : undefined\n`
-  serverSource = `${prelude}${serverSource.replace(marker, `const currentSock = makeWASocket({\n    agent: __QamarProxyAgent,\n    fetchAgent: __QamarProxyAgent,`)}
+  const replacement = `const currentSock = makeWASocket({\n    agent: __QamarProxyAgent,\n    fetchAgent: __QamarProxyAgent,`
+  serverSource = prelude + serverSource.replace(marker, replacement)
 
   // The public pairing page is implemented at `/`. Alias `/pair-ui` to the
   // same GET handler so the pairing URL is stable and directly shareable.
