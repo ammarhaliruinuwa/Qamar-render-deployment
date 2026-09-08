@@ -1,4 +1,5 @@
 import 'global-agent/bootstrap.js'
+import { readFile, writeFile } from 'node:fs/promises'
 import https from 'node:https'
 import { HttpsProxyAgent } from 'https-proxy-agent'
 
@@ -38,4 +39,24 @@ if (proxyAgent) {
   console.log('Qamar WhatsApp proxy agent not configured')
 }
 
-await import('./server.js')
+// Baileys 6.x exposes `agent` and `fetchAgent` on makeWASocket().
+// Inject the proxy agent directly into that socket config so the `ws`
+// WebSocket client receives the agent, rather than relying only on a
+// global https.request monkey-patch.
+const serverPath = new URL('./server.js', import.meta.url)
+let serverSource = await readFile(serverPath, 'utf8')
+
+if (proxyAgent) {
+  const marker = 'const currentSock = makeWASocket({'
+  if (!serverSource.includes(marker)) {
+    throw new Error('Qamar proxy bootstrap could not find makeWASocket configuration')
+  }
+
+  const prelude = `import { HttpsProxyAgent as __QamarHttpsProxyAgent } from 'https-proxy-agent'\nconst __QamarProxyUrl = process.env.BAILEYS_PROXY_URL || process.env.GLOBAL_AGENT_HTTP_PROXY || ''\nconst __QamarProxyAgent = __QamarProxyUrl ? new __QamarHttpsProxyAgent(__QamarProxyUrl) : undefined\n`
+  serverSource = `${prelude}${serverSource.replace(marker, `const currentSock = makeWASocket({\n    agent: __QamarProxyAgent,\n    fetchAgent: __QamarProxyAgent,`)}`
+  await writeFile(new URL('./.qamar-server-runtime.mjs', import.meta.url), serverSource, 'utf8')
+  console.log('Qamar Baileys direct WebSocket proxy agent injected')
+  await import('./.qamar-server-runtime.mjs')
+} else {
+  await import('./server.js')
+}
