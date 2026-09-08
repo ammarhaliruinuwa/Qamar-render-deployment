@@ -2,9 +2,14 @@ import 'global-agent/bootstrap.js'
 import { readFile, writeFile } from 'node:fs/promises'
 import https from 'node:https'
 import { HttpsProxyAgent } from 'https-proxy-agent'
+import { SocksProxyAgent } from 'socks-proxy-agent'
 
 const proxyUrl = process.env.BAILEYS_PROXY_URL || process.env.GLOBAL_AGENT_HTTP_PROXY || ''
-const proxyAgent = proxyUrl ? new HttpsProxyAgent(proxyUrl) : null
+const proxyAgent = proxyUrl
+  ? (proxyUrl.startsWith('socks://') || proxyUrl.startsWith('socks5://') || proxyUrl.startsWith('socks5h://')
+      ? new SocksProxyAgent(proxyUrl)
+      : new HttpsProxyAgent(proxyUrl))
+  : null
 
 if (proxyAgent) {
   const originalRequest = https.request.bind(https)
@@ -34,15 +39,11 @@ if (proxyAgent) {
     return originalRequest(...args)
   }
 
-  console.log('Qamar WhatsApp HTTPS proxy agent enabled')
+  console.log(`Qamar WhatsApp proxy agent enabled: ${proxyUrl.startsWith('socks') ? 'SOCKS5' : 'HTTPS'}`)
 } else {
   console.log('Qamar WhatsApp proxy agent not configured')
 }
 
-// Baileys 6.x exposes `agent` and `fetchAgent` on makeWASocket().
-// Inject the proxy agent directly into that socket config so the `ws`
-// WebSocket client receives the agent, rather than relying only on a
-// global https.request monkey-patch.
 const serverPath = new URL('./server.js', import.meta.url)
 let serverSource = await readFile(serverPath, 'utf8')
 
@@ -52,12 +53,10 @@ if (proxyAgent) {
     throw new Error('Qamar proxy bootstrap could not find makeWASocket configuration')
   }
 
-  const prelude = `import { HttpsProxyAgent as __QamarHttpsProxyAgent } from 'https-proxy-agent'\nconst __QamarProxyUrl = process.env.BAILEYS_PROXY_URL || process.env.GLOBAL_AGENT_HTTP_PROXY || ''\nconst __QamarProxyAgent = __QamarProxyUrl ? new __QamarHttpsProxyAgent(__QamarProxyUrl) : undefined\n`
+  const prelude = `import { HttpsProxyAgent as __QamarHttpsProxyAgent } from 'https-proxy-agent'\nimport { SocksProxyAgent as __QamarSocksProxyAgent } from 'socks-proxy-agent'\nconst __QamarProxyUrl = process.env.BAILEYS_PROXY_URL || process.env.GLOBAL_AGENT_HTTP_PROXY || ''\nconst __QamarProxyAgent = __QamarProxyUrl.startsWith('socks://') || __QamarProxyUrl.startsWith('socks5://') || __QamarProxyUrl.startsWith('socks5h://') ? new __QamarSocksProxyAgent(__QamarProxyUrl) : new __QamarHttpsProxyAgent(__QamarProxyUrl)\n`
   const replacement = `const currentSock = makeWASocket({\n    agent: __QamarProxyAgent,\n    fetchAgent: __QamarProxyAgent,`
   serverSource = prelude + serverSource.replace(marker, replacement)
 
-  // The public pairing page is implemented at `/`. Alias `/pair-ui` to the
-  // same GET handler so the pairing URL is stable and directly shareable.
   serverSource = serverSource.replace(
     "app.get('/', (_req, res) => {",
     "app.get(['/', '/pair-ui'], (_req, res) => {"
