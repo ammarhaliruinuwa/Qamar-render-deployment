@@ -1,12 +1,12 @@
 import 'global-agent/bootstrap.js'
-import * as https from 'node:https'
+import https from 'node:https'
 import { HttpsProxyAgent } from 'https-proxy-agent'
 
 const proxyUrl = process.env.BAILEYS_PROXY_URL || process.env.GLOBAL_AGENT_HTTP_PROXY || ''
 const proxyAgent = proxyUrl ? new HttpsProxyAgent(proxyUrl) : null
 
 if (proxyAgent) {
-  const originalRequest = https.request
+  const originalRequest = https.request.bind(https)
 
   https.request = function patchedHttpsRequest(...args) {
     let options = args[0]
@@ -30,7 +30,7 @@ if (proxyAgent) {
       args[0] = options
     }
 
-    return originalRequest.apply(this, args)
+    return originalRequest(...args)
   }
 
   console.log('Qamar WhatsApp HTTPS proxy agent enabled')
