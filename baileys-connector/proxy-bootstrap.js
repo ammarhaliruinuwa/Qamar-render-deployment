@@ -5,22 +5,20 @@ import { HttpsProxyAgent } from 'https-proxy-agent'
 import { SocksProxyAgent } from 'socks-proxy-agent'
 
 function buildConfiguredProxyUrl() {
-  const direct = process.env.BAILEYS_PROXY_URL || process.env.GLOBAL_AGENT_HTTP_PROXY || process.env.HTTPS_PROXY || process.env.HTTP_PROXY || ''
-  if (direct) return direct
-
+  // Prefer the explicit Decodo credential variables. This avoids accidentally
+  // picking up a platform-provided HTTPS_PROXY value and, importantly, keeps
+  // the exact Decodo username/password supplied by the user unchanged.
   const user = process.env.DECODO_USERNAME || process.env.DECODO_USER || process.env.PROXY_USERNAME || ''
   const password = process.env.DECODO_PASSWORD || process.env.DECODO_PASS || process.env.PROXY_PASSWORD || ''
-  if (!user || !password) return ''
 
-  const host = process.env.DECODO_HOST || 'gate.decodo.com'
-  const protocol = (process.env.DECODO_PROTOCOL || 'http').replace(/:$/, '')
-  const port = process.env.DECODO_PORT || (protocol.startsWith('socks') ? '7001' : '7000')
-  const session = process.env.DECODO_SESSION_ID || 'qamar-wa'
+  if (user && password) {
+    const host = process.env.DECODO_HOST || 'gate.decodo.com'
+    const protocol = (process.env.DECODO_PROTOCOL || 'http').replace(/:$/, '')
+    const port = process.env.DECODO_PORT || (protocol.startsWith('socks') ? '7001' : '10001')
+    return `${protocol}://${encodeURIComponent(user)}:${encodeURIComponent(password)}@${host}:${port}`
+  }
 
-  // For Decodo residential backconnect credentials, append a stable session
-  // identifier so the WhatsApp WebSocket is not moved between IPs.
-  const stickyUser = user.includes('-session-') ? user : `${user}-session-${session}`
-  return `${protocol}://${encodeURIComponent(stickyUser)}:${encodeURIComponent(password)}@${host}:${port}`
+  return process.env.BAILEYS_PROXY_URL || process.env.GLOBAL_AGENT_HTTP_PROXY || process.env.HTTPS_PROXY || process.env.HTTP_PROXY || ''
 }
 
 const configuredProxyUrl = buildConfiguredProxyUrl()
@@ -94,7 +92,7 @@ async function testProxy(proxyUrl, proxyAgent) {
       resolve(result)
     }
 
-    const req = https.request('https://ip.decodo.com/ip', {
+    const req = https.request('https://ip.decodo.com/json', {
       method: 'GET',
       agent: proxyAgent,
       timeout: 12000,
